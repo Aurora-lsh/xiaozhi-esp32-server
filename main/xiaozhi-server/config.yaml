@@ -41,6 +41,37 @@ server:
   mqtt_signature_key: null
   # UDP网关配置
   udp_gateway: null
+# 本地长期记忆：单服务和智控台部署均生效，优先于所选 Memory 模型。
+# 原文和记忆留在本机；提取和回答仍会调用当前配置的大模型接口。
+# 设为 false 可恢复原有 Memory 模型的行为。
+local_memory:
+  enabled: true
+  database_path: data/long_term_memory.sqlite3
+  # 留空使用当前聊天模型，也可以填写已配置的 LLM 名称。
+  llm: ""
+  migrate_legacy: true
+  follow_up_cooldown_hours: 72
+  # 追问往事时，用当前模型扩展同义检索词；普通聊天不增加此调用。
+  query_rewrite: true
+  # 本地有明确匹配时直接回答；没有匹配时才扩展同义词。
+  query_rewrite_on_miss: true
+  # 原文即时落盘；回答后空闲这些秒数再提取记忆，给聊天和语音让出模型。
+  extraction_idle_seconds: 10
+  # 仅限制送入模型的内容；聊天原文和全部记忆仍完整保留在本地。
+  extraction_batch_chars: 1800
+  extraction_max_tokens: 1200
+  # 仅在兼容 JSON Schema 的接口上开启；不改变正常聊天的输出格式。
+  extraction_json_schema: false
+  recall_max_chars: 3600
+  # 角色身份与原创日常：故事单独保存，不作为用户的现实经历。
+  character:
+    enabled: true
+    profile: characters/spongebob.json
+    recall_max_chars: 1200
+  # 留空时管理 API 只允许本机 localhost/127.0.0.1 访问。
+  # 需要在局域网管理时设置独立口令，网页中输入此口令后访问。
+  management_token: ""
+
 log:
   # 设置控制台输出的日志格式，时间、日志级别、标签、消息
   log_format: "<green>{time:YYMMDD HH:mm:ss}</green>[{version}_{selected_module}][<light-blue>{extra[tag]}</light-blue>]-<level>{level}</level>-<light-green>{message}</light-green>"
@@ -119,6 +150,15 @@ wakeup_words:
 # MCP接入点地址，地址格式为：ws://你的mcp接入点ip或者域名:端口号/mcp/?token=你的token
 # 详细教程 https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-integration.md
 mcp_endpoint: 你的接入点 websocket地址
+
+# 随机器人移动的摄像头：逐帧确认药名，每次最多走一步；停止大小需实机标定。
+medicine_navigation:
+  enabled: true
+  max_observations: 12
+  stop_height_ratio: 0.45
+  # label：读药名；marker：仅使用 targets 中人为约定的演示颜色/标签。
+  identity_mode: label
+  targets: {}
 
 # 上下文源配置
 # 用于在系统提示词中注入动态数据，如健康数据、股票信息等
@@ -226,7 +266,7 @@ end_prompt:
   enable: true # 是否开启结束语
   # 结束语
   prompt: |
-    请你以"时间过得真快"未来头，用富有感情、依依不舍的话来结束这场对话吧！
+    请你以"时间过得真快"未来头，用富有感情、依依不舍的话来结束这场对话吧！最后加一句，同学们再见。
 
 # 具体处理时选择的模块(The module selected for specific processing)
 selected_module:
@@ -938,7 +978,10 @@ TTS:
     split_bucket: true
     return_fragment: false
     speed_factor: 1.0
-    streaming_mode: false
+    # 0 为普通合成；1/2/3 为 GPT-SoVITS v2 的流式模式；本地音色实测可用 2。
+    streaming_mode: 0
+    min_chunk_length: 16
+    first_sentence_max_chars: 32
     seed: -1
     parallel_infer: true
     repetition_penalty: 1.35

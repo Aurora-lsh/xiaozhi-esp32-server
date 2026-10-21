@@ -47,6 +47,12 @@ class MCPEndpointExecutor(ToolExecutor):
                     pass
 
             # 视觉大模型不经过二次LLM处理
+            if (tool_name in ("look_at_camera", "watch_camera")
+                    and isinstance(resultJson, dict) and resultJson.get("success") is False
+                    and not resultJson.get("partial")):
+                return ActionResponse(action=Action.ERROR,
+                    response="摄像头这次没有成功返回画面，我还不能判断前面有什么，请稍后再试。")
+
             if (
                 resultJson is not None
                 and isinstance(resultJson, dict)

@@ -1,0 +1,32 @@
+name: xiaozhi-local-mcp
+
+services:
+  xiaozhi-local-mcp:
+    # Reuse the installed XiaoZhi image, which already contains mcp 1.22.0.
+    image: ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest
+    pull_policy: never
+    container_name: xiaozhi-local-mcp
+    restart: unless-stopped
+    entrypoint: ["python", "-u", "/app/server.py"]
+    working_dir: /app
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "127.0.0.1:8004:8004"
+    volumes:
+      - ./:/app:ro
+    networks:
+      - xiaozhi
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  xiaozhi:
+    external: true
+    name: xiaozhi-server_default

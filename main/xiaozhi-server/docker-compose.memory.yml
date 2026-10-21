@@ -1,0 +1,16 @@
+# Run together with docker-compose_all.yml to build this checkout's Python server.
+# Paths are relative to main/xiaozhi-server, the base Compose file's directory.
+services:
+  xiaozhi-esp32-server:
+    image: xiaozhi-esp32-server:local-memory
+    build:
+      context: ../..
+      dockerfile: Dockerfile-server
+      args:
+        # Reuse the already deployed image's dependencies; no new Python
+        # packages are required for local memory.
+        BASE_IMAGE: ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server@sha256:1be29c11c8a1971ef93390d9bf383cf8f7a484376a7c691e85cee3fc0666e07a
+  xiaozhi-esp32-server-db:
+    # Match mysql/data/mysql_upgrade_history; do not upgrade the retained
+    # database just because Docker's image cache was reset.
+    image: mysql:26.7.0

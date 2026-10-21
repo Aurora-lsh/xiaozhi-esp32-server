@@ -1,6 +1,4 @@
 """Tests for the Message/Dialogue classes used to build LLM context."""
-import pytest
-
 from core.utils.dialogue import Dialogue, Message
 
 
@@ -62,8 +60,7 @@ def test_dialogue_update_system_message_creates_when_missing():
     assert d.dialogue[0].role == "system"
 
 
-@pytest.mark.asyncio
-async def test_get_llm_dialogue_with_memory_substitutes_into_system_message():
+def test_get_llm_dialogue_with_memory_substitutes_into_system_message():
     d = Dialogue()
     d.update_system_message("Memory so far: <memory></memory>")
     msgs = d.get_llm_dialogue_with_memory(memory_str="user likes cats")
@@ -72,8 +69,7 @@ async def test_get_llm_dialogue_with_memory_substitutes_into_system_message():
     assert "<memory></memory>" not in system["content"]
 
 
-@pytest.mark.asyncio
-async def test_get_llm_dialogue_separates_temporary_few_shot_from_actual_history():
+def test_get_llm_dialogue_separates_temporary_few_shot_from_actual_history():
     d = Dialogue()
     d.put(Message(role="user", content="real user msg", is_temporary=False))
     d.put(Message(role="user", content="fewshot example", is_temporary=True))

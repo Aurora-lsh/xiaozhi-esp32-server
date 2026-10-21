@@ -1,0 +1,63 @@
+name: xiaozhi-mcp-endpoint
+
+services:
+  endpoint:
+    image: ghcr.nju.edu.cn/xinnan-tech/mcp-endpoint-server@sha256:33ca12e06dcafb965fb27ecf2631070a267451331b65f0cb0e0332247b0491cc
+    container_name: xiaozhi-mcp-endpoint
+    restart: unless-stopped
+    ports:
+      - "8005:8005"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+    networks:
+      - xiaozhi
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:8005/mcp_endpoint/',timeout=5)); assert r['result']['status']=='running'"]
+      interval: 15s
+      timeout: 8s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  calculator:
+    image: ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server@sha256:1be29c11c8a1971ef93390d9bf383cf8f7a484376a7c691e85cee3fc0666e07a
+    container_name: xiaozhi-mcp-calculator
+    restart: unless-stopped
+    init: true
+    working_dir: /app
+    entrypoint: ["python", "-u", "/app/vendor/mcp_pipe.py", "/app/calculator.py"]
+    env_file:
+      - ./private/calculator.env
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - .:/app:ro
+      - ../local-mcp:/local-mcp:ro
+    networks:
+      - xiaozhi
+    depends_on:
+      endpoint:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "/app/verify.py", "--health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  xiaozhi:
+    external: true
+    name: xiaozhi-server_default

@@ -81,6 +81,12 @@ async def get_config_from_api_async(config):
     # 如果服务器没有prompt_template，则从本地配置读取
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    # Local memory is a host-level capability, including when model settings
+    # come from the manager API. Keep one database path for chat and HTTP.
+    local_defaults = read_config(get_project_dir() + "config.yaml").get("local_memory", {})
+    config_data["local_memory"] = merge_configs(local_defaults, config.get("local_memory", {}))
+    navigation_defaults = read_config(get_project_dir() + "config.yaml").get("medicine_navigation", {})
+    config_data["medicine_navigation"] = merge_configs(navigation_defaults, config.get("medicine_navigation", {}))
     return config_data
 
 

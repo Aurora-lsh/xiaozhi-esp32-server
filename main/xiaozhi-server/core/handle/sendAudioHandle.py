@@ -10,6 +10,7 @@ from core.utils import textUtils
 from core.utils.util import audio_to_data
 from core.providers.tts.dto.dto import SentenceType
 from core.utils.audioRateController import AudioRateController
+from core.handle.responseStatusHandle import send_response_status
 
 TAG = __name__
 # 音频帧时长（毫秒）
@@ -315,6 +316,10 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
+    if state == "start":
+        await send_response_status(conn, "thinking")
+    elif state == "sentence_start":
+        await send_response_status(conn, "speaking")
 
 
 async def send_stt_message(conn: "ConnectionHandler", text):

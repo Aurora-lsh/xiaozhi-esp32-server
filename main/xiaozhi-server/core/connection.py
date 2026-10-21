@@ -346,12 +346,21 @@ class ConnectionHandler:
         """消息路由"""
         # 检查是否已经获取到真实的绑定状态
         if not self.bind_completed_event.is_set():
-            # 还没有获取到真实状态，等待直到获取到真实状态或超时
+            # The device sends hello only once. Allow cold private-config/model
+            # initialization to finish instead of dropping its handshake.
+            bind_timeout = 1
+            if isinstance(message, str):
+                try:
+                    initial_message = json.loads(message)
+                    if isinstance(initial_message, dict) and initial_message.get("type") == "hello":
+                        bind_timeout = 30
+                except (ValueError, TypeError):
+                    pass
             try:
-                await asyncio.wait_for(self.bind_completed_event.wait(), timeout=1)
+                await asyncio.wait_for(self.bind_completed_event.wait(), timeout=bind_timeout)
             except asyncio.TimeoutError:
-                # 超时仍未获取到真实状态，丢弃消息
-                await self._discard_message_with_bind_prompt()
+                # Binding is still unknown and TTS may not exist yet. A binding
+                # prompt is only valid after initialization confirms need_bind.
                 return
 
         # 已经获取到真实状态，检查是否需要绑定
@@ -954,6 +963,28 @@ class ConnectionHandler:
             self.memory = modules["memory"]
 
     def _initialize_memory(self):
+        local_options = self.config.get("local_memory", {})
+        if local_options.get("enabled", False):
+            from core.providers.memory.mem_local_long.mem_local_long import MemoryProvider
+
+            # A provider is connection-local. Reusing the server's prototype
+            # would let the last connected device overwrite role_id for others.
+            self.memory = MemoryProvider(local_options)
+            self.memory.init_memory(
+                role_id=self.device_id, llm=self.llm, session_id=self.session_id,
+                summary_memory=self.config.get("summaryMemory"),
+                save_to_file=not self.read_config_from_api,
+            )
+            memory_llm = self.llm
+            model_name = local_options.get("llm")
+            if model_name and model_name in self.config.get("LLM", {}):
+                from core.utils import llm as llm_utils
+
+                model_config = self.config["LLM"][model_name]
+                memory_llm = llm_utils.create_instance(model_config.get("type", model_name), model_config)
+            self.dialogue.on_message = self.memory.record_message
+            self.memory.set_llm(memory_llm)
+            return
         if self.memory is None:
             return
         """初始化记忆模块"""
@@ -1045,7 +1076,9 @@ class ConnectionHandler:
             asyncio.run_coroutine_threadsafe(self.func_handler._initialize(), self.loop)
 
     def change_system_prompt(self, prompt):
-        self.prompt = prompt
+        from core.character.stories import character_prompt
+        self.prompt = character_prompt(prompt,
+            self.config.get("local_memory", {}).get("character", {}))
         # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
 
@@ -1058,9 +1091,15 @@ class ConnectionHandler:
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
+            if hasattr(self.memory, "consume_context_reset") and self.memory.consume_context_reset():
+                # Keep the prompt/examples but discard stale conversational
+                # copies of memories corrected/deleted from voice or the web.
+                self.dialogue.dialogue = [m for m in self.dialogue.dialogue
+                    if m.role == "system" or m.is_temporary]
             current_sentence_id = str(uuid.uuid4().hex)
             self.sentence_id = current_sentence_id  # 更新共享属性
-            self.dialogue.put(Message(role="user", content=query))
+            user_message = Message(role="user", content=query)
+            self.dialogue.put(user_message)
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
@@ -1068,9 +1107,41 @@ class ConnectionHandler:
                     content_type=ContentType.ACTION,
                 )
             )
+            from core.providers.tools.action_teaching import action_teaching_request, dispatch_action_command
+            learned_action = action_teaching_request(query)
+            if learned_action is not None:
+                return dispatch_action_command(self, learned_action, current_sentence_id, user_message, enqueue_tool_report)
+            if hasattr(self.memory, "handle_command") and isinstance(query, str):
+                memory_response = self.memory.handle_command(user_message, self.dialogue.dialogue)
+                if memory_response is not None:
+                    if self.memory.consume_context_reset():
+                        self.dialogue.dialogue = [m for m in self.dialogue.dialogue
+                            if m.role == "system" or m.is_temporary or m is user_message]
+                    self.tts.tts_text_queue.put(TTSMessageDTO(
+                        sentence_id=current_sentence_id, sentence_type=SentenceType.MIDDLE,
+                        content_type=ContentType.TEXT, content_detail=memory_response))
+                    self.tts.store_tts_text(current_sentence_id, memory_response)
+                    self.dialogue.put(Message(role="assistant", content=memory_response))
+                    self.tts.tts_text_queue.put(TTSMessageDTO(
+                        sentence_id=current_sentence_id, sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION))
+                    return True
         else:
             # 递归调用时，使用当前的sentence_id
             current_sentence_id = self.sentence_id
+
+        if depth == 0 and self.intent_type == "function_call" and getattr(self, "func_handler", None):
+            from core.providers.tools.medicine_navigation import (
+                medicine_request, medicine_identification_request, dispatch_medicine_request,
+            )
+            medicine = (medicine_request(query) or
+                        medicine_identification_request(query, self.config.get("medicine_navigation", {})))
+            if medicine is not None:
+                return dispatch_medicine_request(self, medicine, current_sentence_id, enqueue_tool_report)
+            from core.providers.tools.camera_routing import camera_request, dispatch_camera_request
+            camera = camera_request(query)
+            if camera is not None:
+                return dispatch_camera_request(self, camera, current_sentence_id, enqueue_tool_report)
 
         # 设置最大递归深度，避免无限循环，可根据实际需求调整
         MAX_DEPTH = 5
@@ -1091,11 +1162,16 @@ class ConnectionHandler:
 
         # Define intent functions
         functions = None
+        from core.character.routing import story_only_request
+        character = getattr(self.memory, "character", None)
+        story_fast_path = (depth == 0 and character is not None and character.story_turn
+                           and story_only_request(query))
         # 达到最大深度时，禁用工具调用，强制 LLM 直接回答
         if (
                 self.intent_type == "function_call"
                 and hasattr(self, "func_handler")
                 and not force_final_answer
+                and not story_fast_path
         ):
             functions = list(self.func_handler.get_functions())
             # 仅在第一层调用时注入 direct_answer 虚拟工具
@@ -1151,7 +1227,7 @@ class ConnectionHandler:
         emotion_flag = True
         try:
             for response in llm_responses:
-                if self.client_abort:
+                if self.client_abort or current_sentence_id != self.sentence_id:
                     break
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
@@ -1216,6 +1292,8 @@ class ConnectionHandler:
                             )
                         )
         except Exception as e:
+            if self.client_abort or current_sentence_id != self.sentence_id:
+                return False
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
@@ -1234,6 +1312,12 @@ class ConnectionHandler:
                     )
                 )
             return
+        finally:
+            close_stream = getattr(llm_responses, "close", None)
+            if close_stream:
+                close_stream()
+        if self.client_abort or current_sentence_id != self.sentence_id:
+            return False
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1540,6 +1624,8 @@ class ConnectionHandler:
     async def close(self, ws=None):
         """资源清理方法"""
         try:
+            from core.providers.tools.medicine_navigation import stop_navigation
+            await stop_navigation(self)
             # 清理 VAD 连接资源
             if (
                     hasattr(self, "vad")

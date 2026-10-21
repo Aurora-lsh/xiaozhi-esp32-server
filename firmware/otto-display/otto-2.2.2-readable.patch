@@ -1,0 +1,485 @@
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index d03bbae..d98d96c 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -585,6 +585,9 @@ elseif(CONFIG_BOARD_TYPE_SPOTPEAR_ESP32_S3_1_28_BOX)
+ elseif(CONFIG_BOARD_TYPE_OTTO_ROBOT)
+     set(BOARD_TYPE "otto-robot")
+     set(BUILTIN_TEXT_FONT font_puhui_16_4)
++    if(CONFIG_OTTO_READABLE_DISPLAY)
++        set(BUILTIN_TEXT_FONT font_puhui_20_4)
++    endif()
+     set(BUILTIN_ICON_FONT font_awesome_16_4)
+     set(DEFAULT_EMOJI_COLLECTION otto-gif)
+ elseif(CONFIG_BOARD_TYPE_ELECTRON_BOT)
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 97eac4c..9aaf8fb 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -1,5 +1,22 @@
+ menu "Xiaozhi Assistant"
+ 
++config OTTO_NO_CAMERA
++    bool "Use the existing Otto board without an onboard camera"
++    depends on BOARD_TYPE_OTTO_ROBOT
++    default n
++    help
++        Selects NON_CAMERA_VERSION_CONFIG without probing camera GPIOs.
++
++config OTTO_READABLE_DISPLAY
++    bool "Otto large two-line subtitles and text status"
++    depends on BOARD_TYPE_OTTO_ROBOT && USE_DEFAULT_MESSAGE_STYLE
++    default n
++
++config DISPLAY_RESPONSE_STATUS
++    bool "Display negotiated response status hints"
++    default y if OTTO_READABLE_DISPLAY
++    default n
++
+ config OTA_URL
+     string "Default OTA URL"
+     default "https://api.tenclass.net/xiaozhi/ota/"
+diff --git a/main/application.cc b/main/application.cc
+index 3538d9d..f7486fb 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -519,6 +519,23 @@ void Application::InitializeProtocol() {
+     protocol_->OnIncomingJson([this, display](const cJSON* root) {
+         // Parse JSON data
+         auto type = cJSON_GetObjectItem(root, "type");
++        if (!cJSON_IsString(type))
++            return;
++#if CONFIG_DISPLAY_RESPONSE_STATUS
++        if (strcmp(type->valuestring, "response_status") == 0) {
++            auto status = Protocol::ParseResponseStatus(root);
++            if (status != Protocol::ResponseStatus::Unknown) {
++                Schedule([this, display, status]() {
++                    if (GetDeviceState() == kDeviceStateSpeaking) {
++                        display->SetStatus(status == Protocol::ResponseStatus::Thinking
++                                               ? Lang::Strings::THINKING
++                                               : Lang::Strings::SPEAKING);
++                    }
++                });
++            }
++            return;
++        }
++#endif
+         if (strcmp(type->valuestring, "tts") == 0) {
+             auto state = cJSON_GetObjectItem(root, "state");
+             if (strcmp(state->valuestring, "start") == 0) {
+diff --git a/main/assets/locales/en-US/language.json b/main/assets/locales/en-US/language.json
+index 8bb764a..5a21a6d 100644
+--- a/main/assets/locales/en-US/language.json
++++ b/main/assets/locales/en-US/language.json
+@@ -27,6 +27,10 @@
+         "CONNECTED_TO": "Connected to ",
+         "LISTENING": "Listening...",
+         "SPEAKING": "Speaking...",
++        "THINKING": "Thinking...",
++        "READABLE_LISTENING": "Listening",
++        "READABLE_SPEAKING": "Speaking",
++        "READABLE_THINKING": "Thinking",
+         "SERVER_NOT_FOUND": "Looking for available service",
+         "SERVER_NOT_CONNECTED": "Unable to connect to service, please try again later",
+         "SERVER_TIMEOUT": "Waiting for response timeout",
+@@ -56,4 +60,4 @@
+         "LOADING_ASSETS": "Loading assets...",
+         "HELLO_MY_FRIEND": "Hello, my friend!"
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/main/assets/locales/zh-CN/language.json b/main/assets/locales/zh-CN/language.json
+index a21f51a..dde4911 100644
+--- a/main/assets/locales/zh-CN/language.json
++++ b/main/assets/locales/zh-CN/language.json
+@@ -24,6 +24,10 @@
+         "CONNECTED_TO": "已连接 ",
+         "LISTENING": "聆听中...",
+         "SPEAKING": "说话中...",
++        "THINKING": "思考中...",
++        "READABLE_LISTENING": "正在听",
++        "READABLE_SPEAKING": "正在说",
++        "READABLE_THINKING": "正在想",
+         "SERVER_NOT_FOUND": "正在寻找可用服务",
+         "SERVER_NOT_CONNECTED": "无法连接服务，请稍后再试",
+         "SERVER_TIMEOUT": "等待响应超时",
+@@ -56,4 +60,4 @@
+         "FLIGHT_MODE_OFF": "飞行模式已关闭",
+         "FLIGHT_MODE_ON": "飞行模式已开启"
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/main/boards/otto-robot/config.json b/main/boards/otto-robot/config.json
+index a32bc81..c2f87ce 100644
+--- a/main/boards/otto-robot/config.json
++++ b/main/boards/otto-robot/config.json
+@@ -9,6 +9,18 @@
+                 "CONFIG_CAMERA_OV2640_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",
+                 "CONFIG_CAMERA_OV2640_DVP_YUV422_240X240_25FPS=y"
+             ]
++        },
++        {
++            "name": "otto-robot-nocam-readable",
++            "sdkconfig_append": [
++                "CONFIG_HTTPD_WS_SUPPORT=y",
++                "CONFIG_OTTO_NO_CAMERA=y",
++                "CONFIG_OTTO_READABLE_DISPLAY=y",
++                "CONFIG_DISPLAY_RESPONSE_STATUS=y",
++                "CONFIG_USE_DEFAULT_MESSAGE_STYLE=y",
++                "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
++                "CONFIG_FLASH_NONE_ASSETS=y"
++            ]
+         }
+     ]
+-}
+\ No newline at end of file
++}
+diff --git a/main/boards/otto-robot/otto_emoji_display.cc b/main/boards/otto-robot/otto_emoji_display.cc
+index ed59dbb..60a70f8 100644
+--- a/main/boards/otto-robot/otto_emoji_display.cc
++++ b/main/boards/otto-robot/otto_emoji_display.cc
+@@ -10,6 +10,7 @@
+ #include "display/lvgl_display/emoji_collection.h"
+ #include "display/lvgl_display/lvgl_image.h"
+ #include "display/lvgl_display/lvgl_theme.h"
++#include "subtitle_pages.h"
+ 
+ #define TAG "OttoEmojiDisplay"
+ OttoEmojiDisplay::OttoEmojiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
+@@ -17,6 +18,95 @@ OttoEmojiDisplay::OttoEmojiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
+     InitializeOttoEmojis();
+     SetupPreviewImage();
+     SetTheme(LvglThemeManager::GetInstance().GetTheme("dark"));
++#if CONFIG_OTTO_READABLE_DISPLAY
++    SetupReadableDisplay();
++#endif
++}
++
++OttoEmojiDisplay::~OttoEmojiDisplay() {
++#if CONFIG_OTTO_READABLE_DISPLAY
++    DisplayLockGuard lock(this);
++    if (subtitle_timer_)
++        lv_timer_delete(subtitle_timer_);
++#endif
++}
++
++#if CONFIG_OTTO_READABLE_DISPLAY
++void OttoEmojiDisplay::SetTheme(Theme* theme) {
++    SpiLcdDisplay::SetTheme(theme);
++    DisplayLockGuard lock(this);
++    // Assets reload the theme at startup; retain the solid subtitle background.
++    if (bottom_bar_)
++        lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_COVER, 0);
++}
++
++void OttoEmojiDisplay::SetupReadableDisplay() {
++    DisplayLockGuard lock(this);
++    if (!chat_message_label_ || !bottom_bar_)
++        return;
++    auto* font = static_cast<LvglTheme*>(current_theme_)->text_font()->font();
++    int height = font->line_height * 2 + 4;
++    lv_obj_set_height(bottom_bar_, height + 12);
++    lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_COVER, 0);
++    lv_obj_set_size(chat_message_label_, width_ - 16, height);
++    lv_obj_set_style_text_line_space(chat_message_label_, 4, 0);
++    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
++    lv_obj_align(chat_message_label_, LV_ALIGN_TOP_MID, 0, 4);
++    // Keep the full GIF in the space between the status and subtitles.
++    lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, -20);
++    lv_obj_set_style_transform_scale(emoji_box_, 144, 0);
++    lv_obj_set_style_transform_pivot_x(emoji_box_, LV_PCT(50), 0);
++    lv_obj_set_style_transform_pivot_y(emoji_box_, LV_PCT(50), 0);
++    subtitle_timer_ = lv_timer_create(
++        [](lv_timer_t* timer) {
++            static_cast<OttoEmojiDisplay*>(lv_timer_get_user_data(timer))->ShowNextSubtitlePage();
++        },
++        2800, this);
++    lv_timer_pause(subtitle_timer_);
++}
++
++void OttoEmojiDisplay::ShowNextSubtitlePage() {
++    if (++subtitle_page_ < subtitle_pages_.size()) {
++        lv_label_set_text(chat_message_label_, subtitle_pages_[subtitle_page_].c_str());
++    }
++    if (subtitle_page_ + 1 >= subtitle_pages_.size())
++        lv_timer_pause(subtitle_timer_);
++}
++#endif
++
++void OttoEmojiDisplay::SetChatMessage(const char* role, const char* content) {
++#if CONFIG_OTTO_READABLE_DISPLAY
++    DisplayLockGuard lock(this);
++    if (!chat_message_label_ || !subtitle_timer_)
++        return;
++    lv_timer_pause(subtitle_timer_);
++    // Bound allocations and layout work for a malformed server message.
++    std::string text = content ? std::string(content, strnlen(content, 2048)) : "";
++    const auto* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
++    auto measure = [font](const std::string& line) {
++        lv_point_t size;
++        lv_text_get_size(&size, line.c_str(), font, 0, 4, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
++        return size.x;
++    };
++    subtitle_pages_ = MakeSubtitlePages(text, width_ - 16, measure);
++    subtitle_page_ = 0;
++    lv_label_set_text(chat_message_label_,
++                      subtitle_pages_.empty() ? "" : subtitle_pages_[0].c_str());
++    if (subtitle_pages_.size() > 1) {
++        lv_timer_reset(subtitle_timer_);
++        lv_timer_resume(subtitle_timer_);
++    }
++#else
++    SpiLcdDisplay::SetChatMessage(role, content);
++#endif
++}
++
++void OttoEmojiDisplay::ClearChatMessages() {
++#if CONFIG_OTTO_READABLE_DISPLAY
++    SetChatMessage("system", "");
++#else
++    SpiLcdDisplay::ClearChatMessages();
++#endif
+ }
+ 
+ void OttoEmojiDisplay::SetupPreviewImage() {
+@@ -43,6 +133,32 @@ void OttoEmojiDisplay::SetStatus(const char* status) {
+         return;
+     }
+ 
++#if CONFIG_OTTO_READABLE_DISPLAY
++    const char* label = status;
++    bool listening = strcmp(status, Lang::Strings::LISTENING) == 0;
++    bool speaking = strcmp(status, Lang::Strings::SPEAKING) == 0;
++    bool thinking = strcmp(status, Lang::Strings::THINKING) == 0;
++    if (listening)
++        label = Lang::Strings::READABLE_LISTENING;
++    if (speaking)
++        label = Lang::Strings::READABLE_SPEAKING;
++    if (thinking)
++        label = Lang::Strings::READABLE_THINKING;
++    lv_obj_set_style_text_font(status_label_, text_font, 0);
++    lv_label_set_text(status_label_, label);
++    lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
++    if (listening || speaking || thinking) {
++        lv_obj_add_flag(network_label_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_add_flag(battery_label_, LV_OBJ_FLAG_HIDDEN);
++    } else {
++        lv_obj_remove_flag(network_label_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_remove_flag(battery_label_, LV_OBJ_FLAG_HIDDEN);
++    }
++    last_status_update_time_ = std::chrono::system_clock::now();
++    return;
++#endif
++
+     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+         lv_obj_set_style_text_font(status_label_, &OTTO_ICON_FONT, 0);
+         lv_label_set_text(status_label_, "\xEF\x84\xB0");  // U+F130 麦克风图标
+@@ -111,4 +227,4 @@ void OttoEmojiDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
+     lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+     esp_timer_stop(preview_timer_);
+     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
+-}
+\ No newline at end of file
++}
+diff --git a/main/boards/otto-robot/otto_emoji_display.h b/main/boards/otto-robot/otto_emoji_display.h
+index 207ed8a..8938891 100644
+--- a/main/boards/otto-robot/otto_emoji_display.h
++++ b/main/boards/otto-robot/otto_emoji_display.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <string>
++#include <vector>
+ #include "display/lcd_display.h"
+ 
+ /**
+@@ -13,11 +15,23 @@ class OttoEmojiDisplay : public SpiLcdDisplay {
+      */
+     OttoEmojiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy);
+ 
+-    virtual ~OttoEmojiDisplay() = default;
++    virtual ~OttoEmojiDisplay();
+     virtual void SetStatus(const char* status) override;
++    virtual void SetChatMessage(const char* role, const char* content) override;
++    virtual void ClearChatMessages() override;
+     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
++#if CONFIG_OTTO_READABLE_DISPLAY
++    virtual void SetTheme(Theme* theme) override;
++#endif
+ 
+-   private:
++private:
+     void InitializeOttoEmojis();
+     void SetupPreviewImage();
+-};
+\ No newline at end of file
++#if CONFIG_OTTO_READABLE_DISPLAY
++    lv_timer_t* subtitle_timer_ = nullptr;
++    std::vector<std::string> subtitle_pages_;
++    size_t subtitle_page_ = 0;
++    void SetupReadableDisplay();
++    void ShowNextSubtitlePage();
++#endif
++};
+diff --git a/main/boards/otto-robot/otto_robot.cc b/main/boards/otto-robot/otto_robot.cc
+index 69cdf3e..5537236 100644
+--- a/main/boards/otto-robot/otto_robot.cc
++++ b/main/boards/otto-robot/otto_robot.cc
+@@ -286,9 +286,12 @@ public:
+                   i2c_bus_(nullptr),
+                   camera_(nullptr),
+                   has_camera_(false) {
+-        
++#if CONFIG_OTTO_NO_CAMERA
++        has_camera_ = false;
++#else
+         has_camera_ = DetectHardwareVersion();
+-        
++#endif
++
+         if (has_camera_) 
+             hw_config_ = CAMERA_VERSION_CONFIG;
+         else 
+diff --git a/main/protocols/mqtt_protocol.cc b/main/protocols/mqtt_protocol.cc
+index 94d9d12..3bc937c 100644
+--- a/main/protocols/mqtt_protocol.cc
++++ b/main/protocols/mqtt_protocol.cc
+@@ -305,6 +305,9 @@ std::string MqttProtocol::GetHelloMessage() {
+     cJSON_AddBoolToObject(features, "aec", true);
+ #endif
+     cJSON_AddBoolToObject(features, "mcp", true);
++#if CONFIG_DISPLAY_RESPONSE_STATUS
++    cJSON_AddBoolToObject(features, "response_status", true);
++#endif
+     cJSON_AddItemToObject(root, "features", features);
+     cJSON* audio_params = cJSON_CreateObject();
+     cJSON_AddStringToObject(audio_params, "format", "opus");
+diff --git a/main/protocols/protocol.h b/main/protocols/protocol.h
+index 28ef604..f004e76 100644
+--- a/main/protocols/protocol.h
++++ b/main/protocols/protocol.h
+@@ -2,9 +2,11 @@
+ #define PROTOCOL_H
+ 
+ #include <cJSON.h>
+-#include <string>
+-#include <functional>
+ #include <chrono>
++#include <cstring>
++#include <functional>
++#include <memory>
++#include <string>
+ #include <vector>
+ 
+ struct AudioStreamPacket {
+@@ -45,6 +47,18 @@ class Protocol {
+ public:
+     virtual ~Protocol() = default;
+ 
++    enum class ResponseStatus { Unknown, Thinking, Speaking };
++    static ResponseStatus ParseResponseStatus(const cJSON* root) {
++        const auto* state = cJSON_GetObjectItemCaseSensitive(root, "state");
++        if (!cJSON_IsString(state))
++            return ResponseStatus::Unknown;
++        if (strcmp(state->valuestring, "thinking") == 0)
++            return ResponseStatus::Thinking;
++        if (strcmp(state->valuestring, "speaking") == 0)
++            return ResponseStatus::Speaking;
++        return ResponseStatus::Unknown;
++    }
++
+     inline int server_sample_rate() const {
+         return server_sample_rate_;
+     }
+diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
+index f0cc034..d66996b 100644
+--- a/main/protocols/websocket_protocol.cc
++++ b/main/protocols/websocket_protocol.cc
+@@ -210,6 +210,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
+     cJSON_AddBoolToObject(features, "aec", true);
+ #endif
+     cJSON_AddBoolToObject(features, "mcp", true);
++#if CONFIG_DISPLAY_RESPONSE_STATUS
++    cJSON_AddBoolToObject(features, "response_status", true);
++#endif
+     cJSON_AddItemToObject(root, "features", features);
+     cJSON_AddStringToObject(root, "transport", "websocket");
+     cJSON* audio_params = cJSON_CreateObject();
+diff --git a/scripts/release.py b/scripts/release.py
+index 5e0f389..4af9ff8 100755
+--- a/scripts/release.py
++++ b/scripts/release.py
+@@ -231,7 +231,15 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
+             for append in sdkconfig_append:
+                 f.write(f"{append}\n")
+         # Build with macro BOARD_NAME defined to name
+-        if os.system(f"idf.py -DBOARD_NAME={name} -DBOARD_TYPE={board_type} build") != 0:
++        # idf.py invokes Ninja directly, so pass CMake's job limit as a pool.
++        job_flags = ""
++        jobs = os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL", "")
++        if jobs:
++            if not jobs.isdigit() or int(jobs) < 1:
++                raise ValueError("CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer")
++            job_flags = (f" -DCMAKE_JOB_POOLS=release_pool={int(jobs)}"
++                         " -DCMAKE_JOB_POOL_COMPILE=release_pool -DCMAKE_JOB_POOL_LINK=release_pool")
++        if os.system(f"idf.py -DBOARD_NAME={name} -DBOARD_TYPE={board_type}{job_flags} build") != 0:
+             print("build failed")
+             sys.exit(1)
+ 
+
+diff --git a/main/boards/otto-robot/subtitle_pages.h b/main/boards/otto-robot/subtitle_pages.h
+new file mode 100644
+index 0000000..6d90926
+--- /dev/null
++++ b/main/boards/otto-robot/subtitle_pages.h
+@@ -0,0 +1,47 @@
++#pragma once
++
++#include <string>
++#include <utility>
++#include <vector>
++
++// Wrap at UTF-8 character boundaries. The caller supplies the current font's
++// pixel measurement; no fixed-width assumption is made for Chinese or Latin.
++template <typename Measure>
++std::vector<std::string> MakeSubtitlePages(const std::string& text, int width, Measure measure) {
++    std::vector<std::string> pages;
++    std::string line, page;
++    int lines = 0;
++    auto finish_line = [&]() {
++        if (lines != 0)
++            page += '\n';
++        page += line;
++        line.clear();
++        if (++lines == 2) {
++            pages.push_back(std::move(page));
++            page.clear();
++            lines = 0;
++        }
++    };
++    for (size_t i = 0; i < text.size();) {
++        unsigned char first = text[i];
++        size_t bytes = first < 0x80 ? 1 : first < 0xE0 ? 2 : first < 0xF0 ? 3 : 4;
++        if (i + bytes > text.size())
++            break;
++        std::string glyph = text.substr(i, bytes);
++        i += bytes;
++        if (glyph == "\r")
++            continue;
++        if (glyph == "\n") {
++            finish_line();
++            continue;
++        }
++        if (!line.empty() && measure(line + glyph) > width)
++            finish_line();
++        line += glyph;
++    }
++    if (!line.empty())
++        finish_line();
++    if (lines != 0)
++        pages.push_back(std::move(page));
++    return pages;
++}

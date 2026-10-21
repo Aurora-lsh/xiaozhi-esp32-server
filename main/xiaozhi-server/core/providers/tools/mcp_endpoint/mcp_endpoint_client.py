@@ -18,8 +18,10 @@ class MCPEndpointClient:
         self.name_mapping = {}
         self.ready = False
         self.call_results = {}  # To store Futures for tool call responses
-        self.next_id = 1
+        self.next_id = 3  # IDs 1 and 2 belong to initialization and initial listing.
         self.lock = asyncio.Lock()
+        self.tools_refresh_lock = asyncio.Lock()
+        self.tools_refresh_task = None
         self._cached_available_tools = None  # Cache for get_available_tools
         self.websocket = None  # WebSocket连接
 
@@ -71,6 +73,25 @@ class MCPEndpointClient:
             self.next_id += 1
             return current_id
 
+    async def replace_tools(self, tools):
+        """Replace a complete inventory, including removal of disconnected tools."""
+        inventory, mapping = {}, {}
+        for tool in tools:
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                continue
+            original = tool["name"]
+            name = sanitize_tool_name(original)
+            inventory[name] = {"name": original, "description": tool.get("description", ""),
+                               "inputSchema": tool.get("inputSchema", {})}
+            mapping[name] = original
+        for tool in inventory.values():
+            for name, original in mapping.items():
+                tool["description"] = tool["description"].replace(original, name)
+        async with self.lock:
+            self.tools = inventory
+            self.name_mapping = mapping
+            self._cached_available_tools = None
+
     async def register_call_result_future(self, id: int, future: Future):
         async with self.lock:
             self.call_results[id] = future
@@ -107,6 +128,12 @@ class MCPEndpointClient:
 
     async def close(self):
         """关闭WebSocket连接"""
+        if self.tools_refresh_task and not self.tools_refresh_task.done():
+            self.tools_refresh_task.cancel()
+            try:
+                await self.tools_refresh_task
+            except asyncio.CancelledError:
+                pass
         if self.websocket:
             await self.websocket.close()
             self.websocket = None

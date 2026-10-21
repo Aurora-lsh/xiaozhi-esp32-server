@@ -1,0 +1,26 @@
+# This Dockerfile copies only the Python server. Do not send other modules or
+# repository-local runtimes to BuildKit.
+**
+!main/
+!main/xiaozhi-server/
+!main/xiaozhi-server/**
+
+# Runtime state is mounted by Compose, never baked into the image.
+main/xiaozhi-server/data/
+main/xiaozhi-server/mysql/
+main/xiaozhi-server/tmp/
+main/xiaozhi-server/uploadfile/
+main/xiaozhi-server/logs/
+main/xiaozhi-server/models/SenseVoiceSmall/model.pt
+
+# Independent MCP services are not part of the Python server image.
+main/xiaozhi-server/local-mcp/
+main/xiaozhi-server/mcp-endpoint/
+
+**/*.sock
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/node_modules/
+**/.env
+**/.venv/

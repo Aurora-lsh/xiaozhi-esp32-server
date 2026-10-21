@@ -11,6 +11,48 @@ TAG = __name__
 logger = setup_logging()
 
 
+async def refresh_mcp_endpoint_tools(mcp_client, timeout=6):
+    """Fetch a complete live inventory without blocking the message listener."""
+    async def collect():
+        async with mcp_client.tools_refresh_lock:
+            tools, cursor, seen = [], "", set()
+            while True:
+                request_id = await mcp_client.get_next_id()
+                future = asyncio.get_running_loop().create_future()
+                await mcp_client.register_call_result_future(request_id, future)
+                try:
+                    params = {"cursor": cursor} if cursor else {}
+                    await mcp_client.send_message(json.dumps({"jsonrpc": "2.0", "id": request_id,
+                        "method": "tools/list", "params": params}))
+                    result = await future
+                finally:
+                    await mcp_client.cleanup_call_result(request_id)
+                if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+                    raise RuntimeError("Invalid MCP tool inventory")
+                tools.extend(result["tools"])
+                cursor = result.get("nextCursor") or ""
+                if not cursor:
+                    break
+                if cursor in seen:
+                    raise RuntimeError("Repeated MCP tools cursor")
+                seen.add(cursor)
+            await mcp_client.replace_tools(tools)
+            await mcp_client.set_ready(True)
+            conn = mcp_client.conn
+            if conn and getattr(conn, "func_handler", None):
+                conn.func_handler.tool_manager.refresh_tools()
+                conn.func_handler.current_support_functions()
+            return tools
+    return await asyncio.wait_for(collect(), timeout=timeout)
+
+
+async def _refresh_notified_tools(mcp_client):
+    try:
+        await refresh_mcp_endpoint_tools(mcp_client)
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(f"MCP工具列表刷新失败: {type(exc).__name__}")
+
+
 async def connect_mcp_endpoint(mcp_endpoint_url: str, conn=None) -> MCPEndpointClient:
     """连接到MCP接入点"""
     if not mcp_endpoint_url or "你的" in mcp_endpoint_url or mcp_endpoint_url == "null":
@@ -197,6 +239,11 @@ async def handle_mcp_endpoint_message(mcp_client: MCPEndpointClient, message: st
         elif "method" in payload:
             method = payload["method"]
             logger.bind(tag=TAG).info(f"收到MCP接入点请求: {method}")
+            if method == "notifications/tools/list_changed":
+                # Awaiting here would deadlock: this listener resolves list replies.
+                task = mcp_client.tools_refresh_task
+                if task is None or task.done():
+                    mcp_client.tools_refresh_task = asyncio.create_task(_refresh_notified_tools(mcp_client))
 
         elif "error" in payload:
             error_data = payload["error"]

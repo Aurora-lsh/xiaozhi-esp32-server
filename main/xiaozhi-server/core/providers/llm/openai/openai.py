@@ -5,6 +5,8 @@ from config.logger import setup_logging
 from core.utils.util import check_model_key
 from core.providers.llm.base import LLMProviderBase
 from urllib.parse import urlparse
+from core.providers.llm.request_limits import request_lock, fit_messages, context_overflow
+from core.providers.llm.cancellation import SessionRequests
 
 TAG = __name__
 logger = setup_logging()
@@ -22,11 +24,18 @@ THINKING_DISABLED_DOMAINS = {
 class LLMProvider(LLMProviderBase):
     def __init__(self, config):
         self.model_name = config.get("model_name")
+        self._sessions = SessionRequests()
         self.api_key = config.get("api_key")
         if "base_url" in config:
             self.base_url = config.get("base_url")
         else:
             self.base_url = config.get("url")
+        url = urlparse(self.base_url)
+        local_studio = url.hostname in {"localhost", "127.0.0.1", "host.docker.internal", "::1"} and url.port == 1234
+        self.context_window = int(config.get("context_window") or (8192 if local_studio else 0))
+        self.serialize_requests = config.get("serialize_requests", local_studio)
+        self.reasoning_effort = config.get("reasoning_effort",
+            "none" if local_studio and "qwen" in (self.model_name or "").lower() else None)
         
         timeout_config = config.get("timeout")
         if isinstance(timeout_config, dict):
@@ -74,6 +83,7 @@ class LLMProvider(LLMProviderBase):
     @staticmethod
     def normalize_dialogue(dialogue):
         """自动修复 dialogue 中缺失 content 的消息"""
+        dialogue = [dict(msg) for msg in dialogue]
         for msg in dialogue:
             if "role" in msg and "content" not in msg:
                 msg["content"] = ""
@@ -81,6 +91,11 @@ class LLMProvider(LLMProviderBase):
 
     def _apply_thinking_disabled(self, request_params: dict):
         """根据域名自动禁用思考模式"""
+        if self.reasoning_effort is not None:
+            # LM Studio uses this field for Qwen; chat_template_kwargs does not
+            # disable its reasoning. Hidden reasoning otherwise exhausts the
+            # short JSON/extraction output budget before returning any content.
+            request_params["reasoning_effort"] = self.reasoning_effort
         parsed_url = urlparse(self.base_url)
         domain = parsed_url.netloc
         for disabled_domain, params in THINKING_DISABLED_DOMAINS.items():
@@ -88,6 +103,62 @@ class LLMProvider(LLMProviderBase):
                 request_params.setdefault("extra_body", {}).update(params)
                 logger.bind(tag=TAG).info(f"为域名 {domain} 禁用思考模式，参数: {params}")
                 break
+
+    def cancel_response(self, session_id):
+        self._sessions.cancel(session_id)
+
+    def _stream_request(self, request_params, session_id=""):
+        ticket = self._sessions.register(session_id)
+        try:
+            yield from self._stream_cancellable(request_params, ticket)
+        finally:
+            self._sessions.finish(session_id, ticket)
+
+    def _stream_cancellable(self, request_params, ticket):
+        # LM Studio's parallel slots share the loaded model's KV cache. Memory
+        # extraction and speech chat must not fill it simultaneously.
+        with request_lock(self.base_url, self.model_name, self.serialize_requests):
+            if ticket.cancelled.is_set():
+                return
+            original = request_params["messages"]
+            output = request_params.get("max_tokens") or 1024
+            if self.context_window:
+                output = min(int(output), max(128, self.context_window // 4))
+                budget = self.context_window - output - 512
+            else:
+                budget = None
+            for attempt in range(2):
+                if ticket.cancelled.is_set():
+                    return
+                params = dict(request_params)
+                params["messages"] = fit_messages(original, params.get("tools"), budget)
+                if self.context_window:
+                    params["max_tokens"] = output
+                responses = None
+                delivered = False
+                try:
+                    responses = self.client.chat.completions.create(**params)
+                    ticket.attach(responses)
+                    for chunk in responses:
+                        if ticket.cancelled.is_set():
+                            return
+                        choices = getattr(chunk, "choices", None)
+                        delta = choices[0].delta if choices else None
+                        if delta and (getattr(delta, "content", None) or getattr(delta, "tool_calls", None)):
+                            delivered = True
+                        yield chunk
+                    return
+                except Exception as error:
+                    if ticket.cancelled.is_set():
+                        return
+                    if attempt or delivered or budget is None or not context_overflow(error):
+                        raise
+                    logger.bind(tag=TAG).warning("模型上下文不足，缩减本次历史和输出预算后重试；本地原文不变")
+                    budget = max(256, int(budget * 0.65))
+                    output = max(128, output // 2)
+                finally:
+                    if responses is not None:
+                        responses.close()
 
     def response(self, session_id, dialogue, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
@@ -104,6 +175,7 @@ class LLMProvider(LLMProviderBase):
             "temperature": kwargs.get("temperature", self.temperature),
             "top_p": kwargs.get("top_p", self.top_p),
             "frequency_penalty": kwargs.get("frequency_penalty", self.frequency_penalty),
+            "response_format": kwargs.get("response_format"),
         }
 
         for key, value in optional_params.items():
@@ -113,7 +185,7 @@ class LLMProvider(LLMProviderBase):
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
 
-        responses = self.client.chat.completions.create(**request_params)
+        responses = self._stream_request(request_params, session_id)
 
         is_active = True
         try:            
@@ -159,7 +231,7 @@ class LLMProvider(LLMProviderBase):
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
 
-        stream = self.client.chat.completions.create(**request_params)
+        stream = self._stream_request(request_params, session_id)
 
         try:
             for chunk in stream:

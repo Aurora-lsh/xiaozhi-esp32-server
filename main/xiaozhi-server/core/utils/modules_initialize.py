@@ -64,16 +64,20 @@ def initialize_modules(
     # 初始化Memory模块
     if init_memory:
         select_memory_module = config["selected_module"]["Memory"]
-        memory_type = (
-            select_memory_module
-            if "type" not in config["Memory"][select_memory_module]
-            else config["Memory"][select_memory_module]["type"]
-        )
-        modules["memory"] = memory.create_instance(
-            memory_type,
-            config["Memory"][select_memory_module],
-            config.get("summaryMemory", None),
-        )
+        if config.get("local_memory", {}).get("enabled", False):
+            modules["memory"] = memory.create_instance("mem_local_long", config["local_memory"])
+            select_memory_module = "mem_local_long"
+        else:
+            memory_type = (
+                select_memory_module
+                if "type" not in config["Memory"][select_memory_module]
+                else config["Memory"][select_memory_module]["type"]
+            )
+            modules["memory"] = memory.create_instance(
+                memory_type,
+                config["Memory"][select_memory_module],
+                config.get("summaryMemory", None),
+            )
         logger.bind(tag=TAG).info(f"初始化组件: memory成功 {select_memory_module}")
 
     # 初始化VAD模块

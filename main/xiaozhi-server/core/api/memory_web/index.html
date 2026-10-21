@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>小智 · 长期记忆</title>
+  <style>
+    :root{color-scheme:light;--ink:#18352c;--muted:#62766e;--green:#17664b;--line:#dce6df;--paper:#fff}
+    *{box-sizing:border-box}body{margin:0;background:#f4f7f2;color:var(--ink);font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+    main{max-width:1120px;margin:40px auto;padding:0 24px}header{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:26px}
+    h1{font-size:30px;margin:0;letter-spacing:-1px}p{margin:5px 0;color:var(--muted)}.eyebrow{font-size:12px;letter-spacing:2px;color:var(--green)}
+    .toolbar,.filters{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.toolbar{padding:18px;background:var(--paper);border:1px solid var(--line);border-radius:14px;margin-bottom:20px}
+    input,select,textarea,button{font:inherit;border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:white;color:var(--ink)}
+    input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid #4da481;outline-offset:2px}input[type=search]{flex:1;min-width:180px}
+    button{cursor:pointer}button:hover{border-color:var(--green)}button.primary,button[aria-pressed=true]{background:var(--green);color:white;border-color:var(--green)}button:disabled{opacity:.4;cursor:default}
+    .filters{margin:18px 0}.count{margin-left:auto;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+    article{padding:22px;background:var(--paper);border:1px solid var(--line);border-radius:14px;min-width:0}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+    .badge{background:#edf4ed;border-radius:5px;padding:2px 7px}.content{white-space:pre-wrap;overflow-wrap:anywhere;margin:14px 0;font-size:16px;color:var(--ink)}.actions{display:flex;gap:8px;margin-top:18px}.danger{color:#a33b30}
+    #notice{white-space:pre-wrap;margin:12px 0;color:#963e2c;min-height:24px}#empty{padding:60px 20px;text-align:center;border:1px dashed #cbd9ce;border-radius:14px;color:var(--muted)}
+    .pager{display:flex;justify-content:center;align-items:center;gap:16px;margin:25px 0}.archive{grid-column:1/-1}.archive .content{font-size:14px}
+    dialog{border:1px solid var(--line);border-radius:16px;padding:26px;max-width:660px;width:calc(100% - 32px);max-height:85vh;color:var(--ink)}dialog::backdrop{background:#142d2666}
+    dialog h2{margin:0 0 18px;font-size:22px}dialog label{display:block;margin:12px 0}dialog label input,dialog label select,textarea{display:block;width:100%;margin-top:5px}textarea{min-height:130px;resize:vertical}
+    .source{padding:12px;background:#f3f6f2;border-radius:8px;margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere}.hidden,[hidden]{display:none!important}
+    @media(max-width:700px){main{margin-top:22px;padding:0 14px}header{display:block}.grid{grid-template-columns:1fr}h1{font-size:26px}.toolbar>*{width:100%}.count{width:100%;margin-left:0}}
+  </style>
+  <script src="/memory/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><div><div class="eyebrow">XIAOZHI · MEMORY</div><h1>一起经历的，都在这里。</h1><p>管理每台设备的长期记忆，也可以回看当时的聊天。</p></div><p id="device-summary"></p></header>
+  <form class="toolbar" id="search-form">
+    <label for="device">设备</label><select id="device" aria-label="选择设备"><option value="">尚无设备</option></select>
+    <input id="query" type="search" placeholder="搜索人物、事情或关键词" aria-label="搜索记忆或聊天">
+    <button class="primary" type="submit">搜索</button><button id="refresh" type="button">刷新</button>
+  </form>
+  <details><summary>访问设置</summary><p>在本机通过 localhost 打开即可使用。配置了管理口令时，请在这里输入；口令只在当前页面内存中使用。</p>
+    <label for="token">管理口令</label> <input id="token" type="password" autocomplete="off"> <button id="connect">连接</button>
+  </details>
+  <div class="filters"><button id="memories-tab" aria-pressed="true">长期记忆</button><button id="stories-tab" aria-pressed="false">角色故事</button><button id="messages-tab" aria-pressed="false">聊天原文</button><button id="add-story" hidden>添加故事</button><span class="count" id="count"></span></div>
+  <p id="story-note" hidden>海绵宝宝在比奇堡的原创日常，聊天时会自动积累，也可以在这里补充。它们不是动画官方剧情。</p>
+  <p id="notice" role="status" aria-live="polite"></p><div id="empty" hidden>这里还没有内容。和小智聊一聊，记忆会逐渐积累。</div><section class="grid" id="items" aria-label="记忆列表"></section>
+  <nav class="pager" aria-label="翻页"><button id="previous">上一页</button><span id="page">1</span><button id="next">下一页</button></nav>
+</main>
+<dialog id="editor"><form id="edit-form"><h2 id="edit-heading">编辑记忆</h2><p id="edit-note">这里用于纠正记错的信息。生活中的真实变化会保留为不同的历史记忆。</p>
+  <label id="story-title-field" hidden>故事标题<input id="edit-title" maxlength="120"></label>
+  <label><span id="edit-content-label">记忆内容</span><textarea id="edit-content" required maxlength="4000"></textarea></label>
+  <div id="memory-fields">
+  <label>分类<select id="edit-category"><option value="profile">个人信息</option><option value="preference">偏好</option><option value="relationship">人物关系</option><option value="event">经历</option><option value="plan">计划与约定</option></select></label>
+  <label>话题<input id="edit-topic" maxlength="200"></label>
+  <label>状态<select id="edit-status"><option value="active">当前情况</option><option value="historical">过去的情况</option></select></label>
+  <label>事情发生日期 / 时间<input id="edit-time" placeholder="例如 2026-10-19；不知道可留空"></label>
+  <label>下次适合关心的时间<input id="edit-follow-up" type="datetime-local"></label>
+  </div>
+  <p id="edit-error" role="alert"></p><div class="actions"><button id="save-edit" type="submit" class="primary">保存修改</button><button type="button" id="cancel-edit">取消</button></div>
+</form></dialog>
+<dialog id="details"><h2>记忆来源与修改记录</h2><div id="detail-content"></div><div class="actions"><button id="close-details">关闭</button></div></dialog>
+<dialog id="delete-dialog"><h2 id="delete-heading">忘掉这条记忆？</h2><p id="delete-content"></p><p id="delete-note">删除后不再用于回忆，也不会从它的旧原文重新提取。原始聊天文字仍保留在本地档案。</p><p id="delete-error" role="alert"></p><div class="actions"><button id="confirm-delete" class="danger">忘掉这条记忆</button><button id="cancel-delete">取消</button></div></dialog>
+</body>
+</html>

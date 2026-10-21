@@ -1,5 +1,6 @@
 import uuid
 import re
+import logging
 from typing import List, Dict
 from datetime import datetime
 
@@ -20,16 +21,24 @@ class Message:
         self.tool_calls = tool_calls
         self.tool_call_id = tool_call_id
         self.is_temporary = is_temporary  # 标记临时消息（如工具调用提醒）
+        self.created_at = datetime.now().astimezone().isoformat()
 
 
 class Dialogue:
     def __init__(self):
         self.dialogue: List[Message] = []
+        self.on_message = None
         # 获取当前时间
         self.current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def put(self, message: Message):
         self.dialogue.append(message)
+        if self.on_message:
+            try:
+                self.on_message(message)
+            except Exception:
+                # Disk failures must be visible without interrupting speech.
+                logging.getLogger(__name__).exception("本地聊天原文保存失败")
 
     def getMessages(self, m, dialogue):
         if m.tool_calls is not None:
@@ -113,12 +122,12 @@ class Dialogue:
 
             # 填充记忆
             if memory_str is not None:
-                full_prompt = re.sub(
-                    r"<memory>.*?</memory>",
-                    f"<memory>\n{memory_str}\n</memory>",
-                    full_prompt,
-                    flags=re.DOTALL,
-                )
+                memory_block = f"<memory>\n{memory_str}\n</memory>"
+                if re.search(r"<memory>.*?</memory>", full_prompt, flags=re.DOTALL):
+                    full_prompt = re.sub(r"<memory>.*?</memory>", lambda _: memory_block,
+                                         full_prompt, flags=re.DOTALL)
+                else:
+                    full_prompt += "\n" + memory_block
 
             # 追加说话人信息
             try:
@@ -146,6 +155,9 @@ class Dialogue:
                 pass
 
             dialogue.append({"role": "system", "content": full_prompt})
+
+        elif memory_str is not None:
+            dialogue.append({"role": "system", "content": f"<memory>\n{memory_str}\n</memory>"})
 
         # 第二段：few-shot 示例（会话内不变）
         non_system_messages = [m for m in self.dialogue if m.role != "system"]

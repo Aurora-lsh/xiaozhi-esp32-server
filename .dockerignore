@@ -5,3 +5,19 @@ __pycache__
 Dockerfile
 tmp/
 data/
+
+# Build context is the repository root. Exclude mounted runtime directories
+# explicitly; the root-level data/ and tmp/ rules do not cover these paths.
+main/xiaozhi-server/mysql/
+main/xiaozhi-server/data/
+main/xiaozhi-server/tmp/
+main/xiaozhi-server/uploadfile/
+main/xiaozhi-server/logs/
+
+# Local sockets and caches must not be sent to BuildKit or copied into images.
+**/*.sock
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/node_modules/
+**/.env

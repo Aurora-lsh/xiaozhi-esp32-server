@@ -41,6 +41,13 @@ class SimpleHttpServer:
 
             if port:
                 app = web.Application()
+                if self.config.get("local_memory", {}).get("enabled", False):
+                    from core.api.memory_handler import MemoryHandler
+
+                    MemoryHandler(self.config).register(app)
+                    self.logger.bind(tag=TAG).info(
+                        f"本地长期记忆管理：http://localhost:{port}/memory/"
+                    )
 
                 if not read_config_from_api:
                     # 如果没有开启智控台，只是单模块运行，就需要再添加简单OTA接口，用于下发websocket接口

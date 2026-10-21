@@ -10,6 +10,7 @@ from core.handle.abortHandle import handleAbortMessage
 from core.handle.intentHandler import handle_user_intent
 from core.utils.output_counter import check_device_output_limit
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
+from core.utils.dialogue import Message
 
 TAG = __name__
 
@@ -88,9 +89,21 @@ async def startToChat(conn: "ConnectionHandler", text):
         await handleAbortMessage(conn)
 
     # 首先进行意图分析，使用实际文本内容
-    intent_handled = await handle_user_intent(conn, actual_text)
+    before_intent = len(conn.dialogue.dialogue)
+    from core.providers.tools.action_teaching import action_teaching_request
+    if (action_teaching_request(actual_text) is not None or
+            (hasattr(conn.memory, "is_command") and conn.memory.is_command(actual_text))):
+        # Teaching and memory commands reach their deterministic handlers even
+        # when ordinary requests use the separate intent model.
+        intent_handled = False
+    else:
+        intent_handled = await handle_user_intent(conn, actual_text)
 
     if intent_handled:
+        if hasattr(conn.memory, "record_message") and not any(
+            m.role == "user" for m in conn.dialogue.dialogue[before_intent:]
+        ):
+            conn.memory.record_message(Message(role="user", content=actual_text))
         # 如果意图已被处理，不再进行聊天
         return
 
