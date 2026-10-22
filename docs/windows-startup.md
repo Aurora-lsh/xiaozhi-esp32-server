@@ -12,7 +12,7 @@ cd F:\CQU\Project\xiaozhi\xiaozhi-esp32-server
 .\Start-Xiaozhi.ps1
 ```
 
-3. 等待出现绿色的 `All selected backends are ready.`。脚本会检查数据库、智控台 API、小智后端、聊天模型、语音合成和 MCP；语音合成还会检查 Docker 中的小智能否访问本机接口。有错误会停止并指出失败环节。
+3. 等待出现绿色的 `All selected backends are ready.`。脚本先等数据库和 Redis 健康，再启动智控台，然后检查小智后端、聊天模型、语音合成和 MCP；语音合成还会检查 Docker 中的小智能否访问本机接口。等待超过十五秒会显示当前等待时间，智控台检查还会显示 HTTP/API 状态。有错误会停止并指出失败环节。
 4. 打开 [智控台](http://localhost:8002/) 和 [记忆管理页](http://localhost:8003/memory/)。记忆页“访问设置”中输入之前设置的管理口令并连接。
 5. 接通或唤醒 ESP32，让设备与笔记本处于同一局域网，和小智说一句话。回到记忆页点击“刷新”，可查看设备及聊天记录；记忆提取在后台完成，稍后刷新可以看到长期记忆。
 
@@ -166,7 +166,8 @@ python start.py
 - Docker 无法连接：先打开 Docker Desktop，等待 Linux Engine 就绪，再运行脚本。
 - Docker 弹出 `An unexpected error occurred`，并在 `starting services` 后提示某个 `.sock` 无法访问：这是 Docker 自身的 Windows 运行端点问题。先退出 Docker 并保存工作，重启 Windows 后重试；不要用“恢复出厂设置”处理，以免清空镜像和容器数据。若重启后仍失败，保留弹窗中的具体路径及日志继续定位。
 - MySQL 或 Redis 不健康：查看对应容器日志，脚本会在它们恢复前等待。
-- 智控台失败：`docker logs --tail 80 xiaozhi-esp32-server-web`。
+- 卡在 `Waiting for manager API (8002)`：检查的是 `/xiaozhi/user/pub-config`，首页能打开不代表 Java API 已启动。此镜像在 Java 启动失败后仍会由 Nginx 保持容器运行，表现为首页正常但 API 返回 502。Docker 开机自动恢复时可能早于 MySQL 就绪，Java 会因数据库连接失败退出。启动脚本现在会在数据库和 Redis 健康后，检测“HTTP 502 且 Java 进程退出”的情况，并自动重启智控台一次；如果再次退出会直接报错并提示查看 `docker logs --tail 80 xiaozhi-esp32-server-web`，不会反复重启。`-CheckOnly` 只诊断，不执行恢复操作。
+- 智控台其他错误：`docker logs --tail 80 xiaozhi-esp32-server-web`。需要手动恢复时，先确认数据库健康，再运行 `docker restart xiaozhi-esp32-server-web`，随后重新执行启动脚本。
 - 小智后端失败：`docker logs --tail 80 xiaozhi-esp32-server`。
 - 语音合成失败：查看 `main/xiaozhi-server/audio_ref/spongebob/tts-error.log` 和 `tts-output.log`。此服务运行在 Windows Python 中，Docker 容器启动不会自动启动它；统一启动脚本现在会补齐这一步。若提示缺少本机运行时文件，先恢复原有 GPT-SoVITS 目录、虚拟环境及音色配置。
 - 计算器失败：`docker logs --tail 60 xiaozhi-mcp-calculator`，并检查上面的 IP 变化步骤。

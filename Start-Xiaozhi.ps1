@@ -16,6 +16,9 @@ $serverRoot = Join-Path $PSScriptRoot 'main\xiaozhi-server'
 $ttsRoot = Join-Path $serverRoot 'audio_ref\spongebob'
 $script:LocalLlmModel = 'qwen/qwen3.5-9b'
 $script:LocalLlmContext = 16384
+$script:ManagerProbeDetail = ''
+$script:ManagerHttpStatus = 0
+$script:ManagerRecoveryAttempted = $false
 $mainCompose = @('compose', '-f', (Join-Path $serverRoot 'docker-compose_all.yml'),
     '-f', (Join-Path $serverRoot 'docker-compose.memory.yml'))
 $coreContainers = @('xiaozhi-esp32-server-db', 'xiaozhi-esp32-server-redis',
@@ -72,14 +75,25 @@ function Test-LocalImage {
 }
 
 function Wait-Ready {
-    param([string]$Description, [scriptblock]$Probe)
+    param([string]$Description, [scriptblock]$Probe, [scriptblock]$Detail)
     Write-Host ('Waiting for ' + $Description + ' ...')
+    $started = [DateTime]::UtcNow
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $nextProgress = $started.AddSeconds(15)
     do {
         if (& $Probe) { Write-Host ('OK: ' + $Description) -ForegroundColor Green; return }
+        if ([DateTime]::UtcNow -ge $nextProgress) {
+            $elapsed = [int]([DateTime]::UtcNow - $started).TotalSeconds
+            $reason = if ($Detail) { [string](& $Detail) } else { '' }
+            Write-Host ('Still waiting for ' + $Description + ' (' + $elapsed + 's)' +
+                $(if ($reason) { ': ' + $reason } else { '.' }))
+            $nextProgress = [DateTime]::UtcNow.AddSeconds(15)
+        }
         Start-Sleep -Seconds 3
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw ('Timed out waiting for ' + $Description + '. Check the service logs listed in docs/windows-startup.md.')
+    $reason = if ($Detail) { [string](& $Detail) } else { '' }
+    throw ('Timed out waiting for ' + $Description + '. ' + $reason +
+        ' Check the service logs listed in docs/windows-startup.md.')
 }
 
 function Test-ContainerReady {
@@ -113,11 +127,62 @@ function Get-LocalHttpBody {
 }
 
 function Test-ManagerReady {
+    $script:ManagerHttpStatus = 0
     try {
         $body = Get-LocalHttpBody 'http://127.0.0.1:8002/xiaozhi/user/pub-config'
+        $script:ManagerHttpStatus = 200
         $result = $body | ConvertFrom-Json
+        $script:ManagerProbeDetail = 'HTTP 200, API code ' + $result.code
         return $result.code -eq 0
-    } catch { return $false }
+    } catch {
+        $script:ManagerProbeDetail = $_.Exception.Message
+        $failure = $_.Exception
+        for ($depth = 0; $depth -lt 6 -and $null -ne $failure; $depth++) {
+            $responseProperty = $failure.PSObject.Properties['Response']
+            if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
+                $response = $responseProperty.Value
+                $statusProperty = $response.PSObject.Properties['StatusCode']
+                if ($null -ne $statusProperty) {
+                    $script:ManagerHttpStatus = [int]$statusProperty.Value
+                    $script:ManagerProbeDetail = 'HTTP ' + $script:ManagerHttpStatus
+                }
+                if ($response.PSObject.Methods['Close']) { $response.Close() }
+                break
+            }
+            $failure = $failure.InnerException
+        }
+        return $false
+    }
+}
+
+function Get-ManagerJavaState {
+    # This image keeps Nginx running even after its Java child has exited.
+    # A running container alone therefore cannot prove the API is alive.
+    try {
+        $processNames = @(& $script:DockerExe top xiaozhi-esp32-server-web -eo comm 2>$null)
+        if ($LASTEXITCODE -ne 0) { return 'unknown' }
+        if (@($processNames | Where-Object { $_.Trim() -eq 'java' }).Count -gt 0) { return 'running' }
+        return 'exited'
+    } catch { return 'unknown' }
+}
+
+function Test-ManagerStartup {
+    if (Test-ManagerReady) { return $true }
+    if ($script:ManagerHttpStatus -eq 502 -and (Get-ManagerJavaState) -eq 'exited') {
+        $script:ManagerProbeDetail = 'HTTP 502: Nginx is running but the Java API has exited. Run: docker logs --tail 80 xiaozhi-esp32-server-web'
+        if ($CheckOnly) { throw $script:ManagerProbeDetail }
+        if (-not $script:ManagerRecoveryAttempted) {
+            # Docker restart policies can start this container before MySQL is
+            # ready. The caller has already checked MySQL and Redis health.
+            $script:ManagerRecoveryAttempted = $true
+            Write-Warning 'The manager Java API exited during startup. Restarting the manager once after MySQL and Redis are ready.'
+            Invoke-Docker -DockerArguments @('restart', 'xiaozhi-esp32-server-web') | Out-Host
+            $script:ManagerProbeDetail = 'Manager restarted once; waiting for the Java API to finish starting.'
+        } else {
+            throw ('The manager Java API exited again after recovery. ' + $script:ManagerProbeDetail)
+        }
+    }
+    return $false
 }
 
 function Test-MemoryReady {
@@ -286,11 +351,14 @@ try {
 
     if (-not $CheckOnly) {
         Invoke-Docker -DockerArguments ($mainCompose + @('up', '-d', 'xiaozhi-esp32-server-db',
-            'xiaozhi-esp32-server-redis', 'xiaozhi-esp32-server-web'))
+            'xiaozhi-esp32-server-redis'))
     }
     Wait-Ready 'MySQL' { Test-ContainerReady 'xiaozhi-esp32-server-db' }
     Wait-Ready 'Redis' { Test-ContainerReady 'xiaozhi-esp32-server-redis' }
-    Wait-Ready 'manager API (8002)' { Test-ManagerReady }
+    if (-not $CheckOnly) {
+        Invoke-Docker -DockerArguments ($mainCompose + @('up', '-d', '--no-deps', 'xiaozhi-esp32-server-web'))
+    }
+    Wait-Ready 'manager API (8002)' { Test-ManagerStartup } { $script:ManagerProbeDetail }
 
     if (-not $SkipMcp) {
         Show-NetworkNote
